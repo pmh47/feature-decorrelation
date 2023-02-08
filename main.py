@@ -71,21 +71,24 @@ class Model(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        images, labels = batch
+        images, ordinal_labels, text_labels = batch
         embedding = self.fc(self.resnet(images.expand(-1, 3, -1, -1)))
         character_logits = self.char_decoder(embedding.unsqueeze(-1))  # iib, char-in-alphabet, char-in-seq
-        loss = F.cross_entropy(character_logits, labels)
+        loss = F.cross_entropy(character_logits, text_labels)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        images, labels = batch
+        images, _, text_labels = batch
         embedding = self.fc(self.resnet(images.expand(-1, 3, -1, -1)))
         character_logits = self.char_decoder(embedding.unsqueeze(-1))  # iib, char-in-alphabet, char-in-seq
-        loss = F.cross_entropy(character_logits, labels)
-        accuracy = (torch.argmax(character_logits, dim=1) == labels).float().mean()
-        print(' '.join(''.join(chr(c + ord('a') - 1) if c != 0 else ' ' for c in chars_for_iib) for chars_for_iib in torch.argmax(character_logits, dim=1)[:10]), end='')
+        loss = F.cross_entropy(character_logits, text_labels)
+        char_indices = torch.argmax(character_logits, dim=1)
+        charwise_accuracy = (char_indices == text_labels).float().mean()
+        labelwise_accuracy = (char_indices == text_labels).all(dim=1).float().mean()
+        print(' '.join(''.join(chr(c + ord('a') - 1) if c != 0 else ' ' for c in chars_for_iib) for chars_for_iib in char_indices[:10]), end='')
         self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
-        self.log("val_accuracy", accuracy, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val_charwise_accuracy", charwise_accuracy, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val_labelwise_accuracy", labelwise_accuracy, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
@@ -106,9 +109,9 @@ class DatasetWithTextLabels(torch.utils.data.Dataset):
         return len(self.original)
 
     def __getitem__(self, idx):
-        image, label = self.original[idx]
-        label = DatasetWithTextLabels.character_indices_by_label[label]
-        return image, label
+        image, ordinal_label = self.original[idx]
+        text_label = DatasetWithTextLabels.character_indices_by_label[ordinal_label]
+        return image, ordinal_label, text_label
 
 
 def main():
