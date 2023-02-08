@@ -34,7 +34,7 @@ def get_logistic_regression_accuracy_skl(embedding, labels, max_num_iterations=2
     # labels :: iib -> int
     num_classes = 10
     embedding, labels = embedding.cpu().numpy(), labels.cpu().numpy()
-    regressor = sklearn.linear_model.LogisticRegression(random_state=0, max_iter=max_num_iterations)
+    regressor = sklearn.linear_model.LogisticRegression(random_state=0, max_iter=max_num_iterations, multi_class='multinomial')
     regressor.fit(embedding, labels)
     assert len(regressor.classes_) == num_classes
     predictions = regressor.predict(embedding)
