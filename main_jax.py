@@ -43,11 +43,12 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         hk.LayerNorm(axis=-1, create_scale=False, create_offset=False),
         hk.Linear(128), jax.nn.elu,
         hk.LayerNorm(axis=-1, create_scale=False, create_offset=False),
-        hk.Linear(128), jax.nn.elu,
-        hk.LayerNorm(axis=-1, create_scale=False, create_offset=False),
+        hk.Linear(24), jax.nn.elu,
     ])
     decoder = hk.Sequential([
         hk.Conv1DTranspose(128, kernel_shape=5, stride=5), jax.nn.elu,
+        hk.Conv1D(128, kernel_shape=5, padding='SAME'), jax.nn.elu,
+        hk.Conv1D(128, kernel_shape=5, padding='SAME'), jax.nn.elu,
         hk.Conv1D(128, kernel_shape=5, padding='SAME'), jax.nn.elu,
         hk.Conv1D(ALPHABET_SIZE, kernel_shape=1)
     ])
