@@ -18,12 +18,17 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=100):
         def logits_and_loss():
             logits = model(embedding)
             return logits, F.cross_entropy(logits, labels)
-        lr = 4.e-2
-        for _ in range(num_iterations):
+        lr = 10 ** (torch.rand(()) * 2 - 3)
+        lr_decay = 1 - 10 ** (torch.rand(()) * 2.5 - 4)
+        lr_decay_step = torch.randint(1, 10, ())
+        num_iterations = int(10 ** (torch.rand(()) * 1.5 + 2))
+        for iteration in range(num_iterations):
             current_logits, current_loss = logits_and_loss()
             grads = torch.autograd.grad(current_loss, model.parameters(), create_graph=True)
             for param, grad in zip(model.parameters(), grads):
                 param.data -= lr * grad
+            if iteration % lr_decay_step == 0:
+                lr *= lr_decay
     final_logits, final_loss = logits_and_loss()
     final_accuracy = (final_logits.argmax(dim=1) == labels).float().mean()
     return final_loss, final_accuracy
