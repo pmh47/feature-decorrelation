@@ -4,9 +4,11 @@ from typing import Iterator, NamedTuple
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import jaxopt
 import numpy as np
 import optax
 import tensorflow_datasets as tfds
+import sklearn.linear_model
 
 NUM_CLASSES = 10
 ALPHABET_SIZE = 27
@@ -69,28 +71,58 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20):
     # embedding :: iib, channel -> float32
     # labels :: iib -> int
 
-    def get_logits(weight, bias):
+    def get_logits(weight, bias, embedding):
         return embedding @ weight + bias
 
     def get_loss(logits):
         return jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, labels))
 
-    def optimise():
+    def pack(weight, bias):
+        return jnp.concatenate([weight, bias[None, :]], axis=0)
+
+    def unpack(weight_and_bias):
+        weight, bias = jnp.split(weight_and_bias, [weight_and_bias.shape[0] - 1], axis=0)
+        return weight, jnp.squeeze(bias, 0)
+
+    def get_loss_from_packed_params(weight_and_bias, embedding):
+        weight, bias = unpack(weight_and_bias)
+        logits = get_logits(weight, bias, embedding)
+        return get_loss(logits)
+
+    def optimise_gd():
         weight = jnp.zeros([embedding.shape[-1], NUM_CLASSES])
         bias = jnp.zeros([NUM_CLASSES])
         lr = 4.e-2
-        grad_loss = jax.grad(lambda w, b: get_loss(get_logits(w, b)), argnums=(0, 1))
+        grad_loss = jax.grad(get_loss_from_packed_params)
         for _ in range(num_iterations):
-            grad_wrt_weight, grad_wrt_bias = grad_loss(weight, bias)
+            grad_wrt_weight_and_bias = grad_loss(pack(weight, bias), embedding)
+            grad_wrt_weight, grad_wrt_bias = unpack(grad_wrt_weight_and_bias)
             weight -= lr * grad_wrt_weight
             bias -= lr * grad_wrt_bias
         return weight, bias
 
-    final_weight, final_bias = optimise()
-    final_logits = get_logits(final_weight, final_bias)
+    def optimise_jaxopt():
+        solver = jaxopt.BFGS(get_loss_from_packed_params, maxiter=100)
+        params, state = solver.run(init_params=jnp.zeros([embedding.shape[-1] + 1, NUM_CLASSES]), embedding=embedding)
+        return unpack(params)
+
+    # final_weight, final_bias = optimise_gd()
+    final_weight, final_bias = optimise_jaxopt()
+    final_logits = get_logits(final_weight, final_bias, embedding)
     final_loss = get_loss(final_logits)
     final_accuracy = (jnp.argmax(final_logits, axis=1) == labels).mean()
     return final_loss, final_accuracy
+
+
+def get_logistic_regression_accuracy_skl(embedding, labels, max_num_iterations=2000):
+    # embedding :: iib, channel -> float32
+    # labels :: iib -> int
+    regressor = sklearn.linear_model.LogisticRegression(random_state=0, max_iter=max_num_iterations, multi_class='multinomial')
+    regressor.fit(embedding, labels)
+    assert len(regressor.classes_) == NUM_CLASSES
+    predictions = regressor.predict(embedding)
+    accuracy = (predictions == labels).mean()
+    return accuracy
 
 
 def main():
@@ -112,7 +144,7 @@ def main():
         _, lr_accuracy = get_logistic_regression_loss(embedding, batch.ordinal_label)
         charwise_accuracy = jnp.mean(predictions == batch.text_label)
         labelwise_accuracy = jnp.mean(jnp.all(predictions == batch.text_label, axis=1))
-        return charwise_accuracy, labelwise_accuracy, lr_accuracy
+        return charwise_accuracy, labelwise_accuracy, lr_accuracy, embedding
 
     @jax.jit
     def update(state: TrainingState, batch: Batch) -> TrainingState:
@@ -126,7 +158,7 @@ def main():
 
     # Make datasets.
     train_dataset = load_dataset("train", shuffle=True, batch_size=1_000)
-    eval_datasets = {split: load_dataset(split, shuffle=False, batch_size=10_000) for split in ("train", "test")}
+    eval_datasets = {split: load_dataset(split, shuffle=False, batch_size=10_000) for split in ("test",)}
 
     # Initialise network and optimiser; note we draw an input to get shapes.
     initial_params = network.init(jax.random.PRNGKey(seed=0), next(train_dataset).image)
@@ -134,11 +166,13 @@ def main():
     state = TrainingState(initial_params, initial_params, initial_opt_state)
 
     # Training & evaluation loop.
-    for step in range(3001):
+    for step in range(50001):
         if step % 100 == 0:
             for split, dataset in eval_datasets.items():
-                charwise_accuracy, labelwise_accuracy, lr_accuracy = np.array(evaluate(state.avg_params, next(dataset)))
-                print({"step": step, "split": split, "charwise_accuracy": f"{charwise_accuracy:.3f}", "labelwise_accuracy": f"{labelwise_accuracy:.3f}", "lr_accuracy": f"{lr_accuracy:.3f}"})
+                batch = next(dataset)
+                charwise_accuracy, labelwise_accuracy, lr_accuracy_ours, embedding = map(np.array, evaluate(state.avg_params, batch))
+                lr_accuracy_skl = get_logistic_regression_accuracy_skl(embedding, batch.ordinal_label)
+                print({"step": step, "split": split, "charwise_accuracy": f"{charwise_accuracy:.3f}", "labelwise_accuracy": f"{labelwise_accuracy:.3f}", "lr_accuracy_ours": f"{lr_accuracy_ours:.3f}", "lr_accuracy_skl": f"{lr_accuracy_skl:.3f}"})
 
         state = update(state, next(train_dataset))
 
