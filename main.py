@@ -7,22 +7,28 @@ import torchvision.models
 import pytorch_lightning as pl
 
 
-def do_logistic_regression(embedding, labels):
+def get_logistic_regression_loss(embedding, labels, num_iterations=20):
     # embedding :: iib, channel -> float32
     # labels :: iib -> int
     num_classes = 10
     batch_size = embedding.shape[1]
-    model = nn.Linear(batch_size, num_classes).to(embedding.device)
-    def logits_and_loss():
-        logits = model(embedding)
-        return logits, F.cross_entropy(logits, labels)
-    lr = 4.e-2
-    for _ in range(20):
-        current_logits, current_loss = logits_and_loss()
-        print('loss:', current_loss.item(), '; accuracy:', (current_logits.argmax(dim=1) == labels).float().mean().item())
-        grads = torch.autograd.grad(current_loss, model.parameters(), create_graph=False)
-        for param, grad in zip(model.parameters(), grads):
-            param.data -= lr * grad
+    with torch.enable_grad():  # in case we're in inference mode
+        model = nn.Linear(batch_size, num_classes).to(embedding.device)
+        def logits_and_loss():
+            logits = model(embedding)
+            return logits, F.cross_entropy(logits, labels)
+        lr = 4.e-2
+        for _ in range(num_iterations):
+            current_logits, current_loss = logits_and_loss()
+            grads = torch.autograd.grad(current_loss, model.parameters(), create_graph=True)
+            for param, grad in zip(model.parameters(), grads):
+                param.data -= lr * grad
+    final_logits, final_loss = logits_and_loss()
+    final_accuracy = (final_logits.argmax(dim=1) == labels).float().mean()
+    # print('final loss:', final_loss.item(), '; final accuracy:', (final_logits.argmax(dim=1) == labels).float().mean().item())
+    # we want the grad of the after-final-iteration loss, wrt the parameters of the neural network -- and thus of the embedding
+    # print('G', torch.autograd.grad(current_loss, embedding, create_graph=False))
+    return final_loss, final_accuracy
 
 
 class Model(pl.LightningModule):
@@ -47,14 +53,15 @@ class Model(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         images, ordinal_labels, text_labels = batch
         embedding = self.fc(self.resnet(images.expand(-1, 3, -1, -1)))
-        do_logistic_regression(embedding, ordinal_labels)
+        lr_loss, _ = get_logistic_regression_loss(embedding, ordinal_labels)
         character_logits = self.char_decoder(embedding.unsqueeze(-1))  # iib, char-in-alphabet, char-in-seq
-        loss = F.cross_entropy(character_logits, text_labels)
-        return loss
+        classification_loss = F.cross_entropy(character_logits, text_labels)
+        return classification_loss + -lr_loss
 
     def validation_step(self, batch, batch_idx):
-        images, _, text_labels = batch
+        images, ordinal_labels, text_labels = batch
         embedding = self.fc(self.resnet(images.expand(-1, 3, -1, -1)))
+        _, lr_accuracy = get_logistic_regression_loss(embedding, ordinal_labels, num_iterations=100)
         character_logits = self.char_decoder(embedding.unsqueeze(-1))  # iib, char-in-alphabet, char-in-seq
         loss = F.cross_entropy(character_logits, text_labels)
         char_indices = torch.argmax(character_logits, dim=1)
@@ -64,6 +71,7 @@ class Model(pl.LightningModule):
         self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log("val_charwise_accuracy", charwise_accuracy, prog_bar=True, on_step=False, on_epoch=True)
         self.log("val_labelwise_accuracy", labelwise_accuracy, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val_lr_accuracy", lr_accuracy, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
