@@ -156,7 +156,7 @@ def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Ba
 def main():
 
     network = hk.without_apply_rng(hk.transform(net_fn))
-    optimiser = optax.adam(1e-3)
+    optimiser = optax.adam(5.e-4)
 
     def loss(params: hk.Params, batch: Batch) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
