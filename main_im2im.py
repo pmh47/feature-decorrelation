@@ -19,6 +19,7 @@ class Batch(NamedTuple):
     input_image: np.ndarray  # [B, H, W, 3]
     ordinal_label: np.ndarray  # [B]
     output_image: np.ndarray  # [B, H, W, 3]
+    all_overlaid_images: np.ndarray  # [B, K, H, W, 3]
 
 
 digit_patches = [
@@ -93,13 +94,14 @@ digit_patches = [
         [0, 0, 1],
     ],
 ]
+digit_patches = jax.image.resize(jnp.asarray(digit_patches), [len(digit_patches), 10, 6], jax.image.ResizeMethod.NEAREST)[..., None]
 def make_batch(image, label):
     image = jnp.tile(image, [1, 1, 1, 3]).astype(jnp.float32) / 255.
     input_image = image * 0.5 + (1 - image) * np.random.random(size=(image.shape[0], 1, 1, 3))
-    patches = jnp.asarray([digit_patches[L] for L in label])
-    patches = jax.image.resize(patches, [patches.shape[0], 10, 6], jax.image.ResizeMethod.NEAREST)[..., None]
-    output_image = input_image.at[:, -10:, -6:, :].set(jnp.where(patches, 0.75, input_image[:, -10:, -6:, :]))
-    return Batch(input_image, label, output_image)
+    all_overlaid_images = jnp.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
+    all_overlaid_images = all_overlaid_images.at[:, :, -10:, -6:, :].set(jnp.where(digit_patches, 0.75, all_overlaid_images[:, :, -10:, -6:, :]))
+    output_image = jax.vmap(lambda overlaid_images, L: overlaid_images[L])(all_overlaid_images, label)
+    return Batch(input_image, label, output_image, all_overlaid_images)
 
 
 class TrainingState(NamedTuple):
@@ -169,8 +171,10 @@ def main():
     def evaluate(params: hk.Params, batch: Batch) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         # _, lr_accuracy = get_logistic_regression_loss(embedding, batch.ordinal_label)
-        mse = jnp.mean(jnp.square(batch.output_image - prediction))
-        accuracy = 0  # accuracy = fraction of instances where the prediction is closer to the gt label than to all othes
+        mses = jnp.mean(jnp.square(batch.all_overlaid_images - prediction[:, None]), axis=[2, 3, 4])
+        mse = jnp.mean(jax.vmap(lambda mses_for_iib, label_for_iib: mses_for_iib[label_for_iib])(mses, batch.ordinal_label))
+        argbest_mses = jnp.argmin(mses, axis=1)
+        accuracy = jnp.mean(argbest_mses == batch.ordinal_label)
         return mse, accuracy, embedding, prediction[:8]
 
     @jax.jit
