@@ -158,14 +158,25 @@ def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Ba
 def main():
 
     network = hk.without_apply_rng(hk.transform(net_fn))
-    optimiser = optax.adam(5.e-4)
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.,
+        peak_value=1.e-2,
+        warmup_steps=2000,
+        decay_steps=100_000,
+        end_value=0.,
+    )
+
+    optimiser = optax.chain(
+        optax.clip(2.),
+        optax.adamw(learning_rate=schedule, weight_decay=1.e-4),
+    )
+    # optimiser = optax.adam(5.e-4)
 
     def loss(params: hk.Params, batch: Batch) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         reconstruction_loss = jnp.mean(jnp.square(batch.output_image - prediction))
         # lr_loss, lr_accuracy = get_logistic_regression_loss(embedding, batch.ordinal_label)
-        l2_regulariser = 0.5 * sum(jnp.sum(jnp.square(p)) for p in jax.tree_util.tree_leaves(params))
-        return reconstruction_loss + 1e-4 * l2_regulariser  # - lr_loss
+        return reconstruction_loss # - lr_loss
 
     @jax.jit
     def evaluate(params: hk.Params, batch: Batch) -> jnp.ndarray:
@@ -180,7 +191,7 @@ def main():
     @jax.jit
     def update(state: TrainingState, batch: Batch) -> TrainingState:
         grads = jax.grad(loss)(state.params, batch)
-        updates, opt_state = optimiser.update(grads, state.opt_state)
+        updates, opt_state = optimiser.update(grads, state.opt_state, params=state.params)
         params = optax.apply_updates(state.params, updates)
         # Compute avg_params, the exponential moving average of the "live" params.
         # We use this only for evaluation (cf. https://doi.org/10.1137/0330046).
@@ -198,13 +209,14 @@ def main():
 
     # Training & evaluation loop.
     for step in range(100_001):
-        if step % 10000 == 0:
+        if step % 100 == 0:
             batch = next(eval_dataset)
             mse, accuracy, embedding, first_predictions = map(np.array, evaluate(state.avg_params, batch))
             # lr_accuracy_skl = get_logistic_regression_accuracy_skl(embedding, batch.ordinal_label)
-            print({"step": step, "mse": f"{mse:.3f}", "accuracy": f"{accuracy:.3f}"})
-            plt.imshow(jnp.reshape(jnp.concatenate([batch.input_image[:first_predictions.shape[0]], batch.output_image[:first_predictions.shape[0]], first_predictions], axis=2), [-1, batch.input_image.shape[2] * 3, 3]))
-            plt.show()
+            print({"step": step, "mse": f"{mse:.4f}", "accuracy": f"{accuracy:.3f}"})
+            if step % 10000 == 0:
+                plt.imshow(jnp.reshape(jnp.concatenate([batch.input_image[:first_predictions.shape[0]], batch.output_image[:first_predictions.shape[0]], first_predictions], axis=2), [-1, batch.input_image.shape[2] * 3, 3]))
+                plt.show()
 
         state = update(state, next(train_dataset))
 
