@@ -121,7 +121,6 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         hk.Conv2D(64, kernel_shape=3, stride=2), jax.nn.elu,
         hk.GroupNorm(8),
         hk.Flatten(),
-        # hk.LayerNorm(1, create_scale=True, create_offset=True),
         hk.Linear(128), jax.nn.elu,
     ])
     upsample = lambda x: jax.image.resize(x, [x.shape[0], x.shape[1] * 2, x.shape[2] * 2, x.shape[3]], method=jax.image.ResizeMethod.LINEAR)
@@ -158,6 +157,7 @@ def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Ba
 def main():
 
     network = hk.without_apply_rng(hk.transform(net_fn))
+
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.,
         peak_value=1.e-2,
@@ -165,12 +165,10 @@ def main():
         decay_steps=100_000,
         end_value=0.,
     )
-
     optimiser = optax.chain(
         optax.clip(2.),
         optax.adamw(learning_rate=schedule, weight_decay=1.e-4),
     )
-    # optimiser = optax.adam(5.e-4)
 
     def loss(params: hk.Params, batch: Batch) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
