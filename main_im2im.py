@@ -1,4 +1,4 @@
-
+import os
 from typing import Iterator, NamedTuple
 
 import haiku as hk
@@ -6,6 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import chex
+import pickle
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 
@@ -154,6 +156,14 @@ def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Ba
     return iter(ds)
 
 
+def save_ckpt(state: TrainingState, step: int):
+    folder = './out/im2im/baseline'
+    filename = f'{folder}/{step // 10_000:03}.pkl'
+    os.makedirs(folder, exist_ok=True)
+    with open(filename, 'wb') as f:
+        pickle.dump(state, f)
+
+
 def main():
 
     network = hk.without_apply_rng(hk.transform(net_fn))
@@ -170,11 +180,14 @@ def main():
         optax.adamw(learning_rate=schedule, weight_decay=1.e-4),
     )
 
-    def loss(params: hk.Params, batch: Batch) -> jnp.ndarray:
+    lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=1.e-3, transition_steps=5000, transition_begin=10000)
+
+    def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         reconstruction_loss = jnp.mean(jnp.square(batch.output_image - prediction))
-        # lr_loss, lr_accuracy = get_logistic_regression_loss(embedding, batch.ordinal_label)
-        return reconstruction_loss # - lr_loss
+        lr_loss, lr_accuracy = get_logistic_regression_loss(embedding, batch.ordinal_label)
+        lr_loss = -lr_loss * lr_loss_weight
+        return reconstruction_loss + lr_loss, (reconstruction_loss, lr_loss)
 
     @jax.jit
     def evaluate(params: hk.Params, batch: Batch) -> jnp.ndarray:
@@ -188,13 +201,14 @@ def main():
 
     @jax.jit
     def update(state: TrainingState, batch: Batch) -> TrainingState:
-        grads = jax.grad(loss)(state.params, batch)
+        lr_loss_weight = lr_weight_schedule(state.opt_state[-1][0].count)
+        grads, losses_for_logging = jax.grad(loss, has_aux=True)(state.params, batch, lr_loss_weight)
         updates, opt_state = optimiser.update(grads, state.opt_state, params=state.params)
         params = optax.apply_updates(state.params, updates)
         # Compute avg_params, the exponential moving average of the "live" params.
         # We use this only for evaluation (cf. https://doi.org/10.1137/0330046).
         avg_params = optax.incremental_update(params, state.avg_params, step_size=0.001)
-        return TrainingState(params, avg_params, opt_state)
+        return TrainingState(params, avg_params, opt_state), losses_for_logging
 
     # Make datasets.
     train_dataset = load_dataset("train", shuffle=True, batch_size=128)
@@ -210,13 +224,18 @@ def main():
         if step % 100 == 0:
             batch = next(eval_dataset)
             mse, accuracy, embedding, first_predictions = map(np.array, evaluate(state.avg_params, batch))
-            # lr_accuracy_skl = get_logistic_regression_accuracy_skl(embedding, batch.ordinal_label)
             print({"step": step, "mse": f"{mse:.4f}", "accuracy": f"{accuracy:.3f}"})
-            if step % 10000 == 0:
+            if step % 1000 == 0:
+                lr_accuracy_skl = get_logistic_regression_accuracy_skl(embedding, batch.ordinal_label)
+                print({"step": step, "lr_accuracy_skl": f"{lr_accuracy_skl:3f}"})
                 plt.imshow(jnp.reshape(jnp.concatenate([batch.input_image[:first_predictions.shape[0]], batch.output_image[:first_predictions.shape[0]], first_predictions], axis=2), [-1, batch.input_image.shape[2] * 3, 3]))
+                plt.title(f'step {step}')
                 plt.show()
+                save_ckpt(state, step)
 
-        state = update(state, next(train_dataset))
+        state, (recon_loss, lr_loss) = update(state, next(train_dataset))
+        if step % 100 == 0:
+            print({"step": step, "learning_rate": f"{schedule(step):.1E}", "recon_loss": f"{recon_loss:.4f}", "lr_loss": f"{lr_loss:.4f}", "lr_loss_weight": f"{lr_weight_schedule(step):.1E}"})
 
 
 if __name__ == '__main__':
