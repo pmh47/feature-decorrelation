@@ -75,7 +75,7 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20):
     def get_logits(weight, bias, embedding):
         return embedding @ weight + bias
 
-    def get_loss(logits):
+    def get_loss(logits, labels):
         return jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, labels))
 
     def pack(weight, bias):
@@ -85,10 +85,10 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20):
         weight, bias = jnp.split(weight_and_bias, [weight_and_bias.shape[0] - 1], axis=0)
         return weight, jnp.squeeze(bias, 0)
 
-    def get_loss_from_packed_params(weight_and_bias, embedding):
+    def get_loss_from_packed_params(weight_and_bias, embedding, labels):
         weight, bias = unpack(weight_and_bias)
         logits = get_logits(weight, bias, embedding)
-        return get_loss(logits)
+        return get_loss(logits, labels)
 
     def optimise_gd():
         weight = jnp.zeros([embedding.shape[-1], NUM_CLASSES])
@@ -96,7 +96,7 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20):
         lr = 4.e-2
         grad_loss = jax.grad(get_loss_from_packed_params)
         for _ in range(num_iterations):
-            grad_wrt_weight_and_bias = grad_loss(pack(weight, bias), embedding)
+            grad_wrt_weight_and_bias = grad_loss(pack(weight, bias), embedding, labels)
             grad_wrt_weight, grad_wrt_bias = unpack(grad_wrt_weight_and_bias)
             weight -= lr * grad_wrt_weight
             bias -= lr * grad_wrt_bias
@@ -104,13 +104,13 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20):
 
     def optimise_jaxopt():
         solver = jaxopt.BFGS(get_loss_from_packed_params, maxiter=100)
-        params, state = solver.run(init_params=jnp.zeros([embedding.shape[-1] + 1, NUM_CLASSES]), embedding=embedding)
+        params, state = solver.run(init_params=jnp.zeros([embedding.shape[-1] + 1, NUM_CLASSES]), embedding=embedding, labels=labels)
         return unpack(params)
 
     # final_weight, final_bias = optimise_gd()
     final_weight, final_bias = optimise_jaxopt()
     final_logits = get_logits(final_weight, final_bias, embedding)
-    final_loss = get_loss(final_logits)
+    final_loss = get_loss(final_logits, labels)
     final_accuracy = (jnp.argmax(final_logits, axis=1) == labels).mean()
     return final_loss, final_accuracy
 

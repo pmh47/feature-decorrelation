@@ -190,7 +190,7 @@ def main():
     def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         reconstruction_loss = jnp.mean(jnp.square(batch.output_image - prediction))
-        lr_loss, lr_accuracy = get_logistic_regression_loss(embedding, batch.ordinal_label)
+        lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, get_logistic_regression_loss, lambda e, l: (0., 0.), embedding, batch.ordinal_label)
         lr_loss = -lr_loss * lr_loss_weight
         return reconstruction_loss + lr_loss, (reconstruction_loss, lr_loss)
 
