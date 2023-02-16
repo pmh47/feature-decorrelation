@@ -15,6 +15,7 @@ from main_jax import get_logistic_regression_loss, get_logistic_regression_accur
 
 
 NUM_CLASSES = 10
+out_dir = './out/im2im/from-baseline-ckpt'
 
 
 class Batch(NamedTuple):
@@ -123,7 +124,7 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         hk.Conv2D(64, kernel_shape=3, stride=2), jax.nn.elu,
         hk.GroupNorm(8),
         hk.Flatten(),
-        hk.Linear(128), jax.nn.elu,
+        hk.Linear(64), jax.nn.elu,
     ])
     upsample = lambda x: jax.image.resize(x, [x.shape[0], x.shape[1] * 2, x.shape[2] * 2, x.shape[3]], method=jax.image.ResizeMethod.LINEAR)
     decoder = hk.Sequential([
@@ -157,11 +158,15 @@ def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Ba
 
 
 def save_ckpt(state: TrainingState, step: int):
-    folder = './out/im2im/baseline'
-    filename = f'{folder}/{step // 10_000:03}.pkl'
-    os.makedirs(folder, exist_ok=True)
+    filename = f'{out_dir}/{step // 1000:03}.pkl'
+    os.makedirs(out_dir, exist_ok=True)
     with open(filename, 'wb') as f:
         pickle.dump(state, f)
+
+
+def load_ckpt(filename: str) -> TrainingState:
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
 
 
 def main():
@@ -170,17 +175,17 @@ def main():
 
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.,
-        peak_value=1.e-2,
+        peak_value=4.e-3,
         warmup_steps=2000,
         decay_steps=100_000,
         end_value=0.,
     )
     optimiser = optax.chain(
         optax.clip(2.),
-        optax.adamw(learning_rate=schedule, weight_decay=1.e-4),
+        optax.adamw(learning_rate=schedule, weight_decay=1.e-5),
     )
 
-    lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=1.e-3, transition_steps=5000, transition_begin=10000)
+    lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=5.e-4, transition_steps=100, transition_begin=10000)
 
     def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
@@ -211,7 +216,7 @@ def main():
         return TrainingState(params, avg_params, opt_state), losses_for_logging
 
     # Make datasets.
-    train_dataset = load_dataset("train", shuffle=True, batch_size=128)
+    train_dataset = load_dataset("train", shuffle=True, batch_size=256)
     eval_dataset =  load_dataset("test", shuffle=False, batch_size=1_000)
 
     # Initialise network and optimiser; note we draw an input to get shapes.
@@ -219,8 +224,10 @@ def main():
     initial_opt_state = optimiser.init(initial_params)
     state = TrainingState(initial_params, initial_params, initial_opt_state)
 
-    # Training & evaluation loop.
-    for step in range(100_001):
+    state = load_ckpt(f'./out/im2im/baseline/010.pkl')
+
+    initial_step = state.opt_state[-1][0].count
+    for step in range(initial_step, 100_001):
         if step % 100 == 0:
             batch = next(eval_dataset)
             mse, accuracy, embedding, first_predictions = map(np.array, evaluate(state.avg_params, batch))
@@ -230,10 +237,14 @@ def main():
                 print({"step": step, "lr_accuracy_skl": f"{lr_accuracy_skl:3f}"})
                 plt.imshow(jnp.reshape(jnp.concatenate([batch.input_image[:first_predictions.shape[0]], batch.output_image[:first_predictions.shape[0]], first_predictions], axis=2), [-1, batch.input_image.shape[2] * 3, 3]))
                 plt.title(f'step {step}')
-                plt.show()
+                os.makedirs(out_dir, exist_ok=True)
+                plt.savefig(f'{out_dir}/{step // 1000:03}.png')
+                plt.clf()
                 save_ckpt(state, step)
 
         state, (recon_loss, lr_loss) = update(state, next(train_dataset))
+        if jnp.isnan(recon_loss) or jnp.isnan(lr_loss):
+            raise RuntimeError('NaN loss')
         if step % 100 == 0:
             print({"step": step, "learning_rate": f"{schedule(step):.1E}", "recon_loss": f"{recon_loss:.4f}", "lr_loss": f"{lr_loss:.4f}", "lr_loss_weight": f"{lr_weight_schedule(step):.1E}"})
 
