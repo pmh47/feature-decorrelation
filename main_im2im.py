@@ -15,7 +15,7 @@ from main_jax import get_logistic_regression_loss, get_logistic_regression_accur
 
 
 NUM_CLASSES = 10
-out_dir = './out/im2im/from-baseline-ckpt'
+out_dir = './out/im2im/ln-linear-ln-in-dec'
 
 
 class Batch(NamedTuple):
@@ -128,6 +128,9 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
     ])
     upsample = lambda x: jax.image.resize(x, [x.shape[0], x.shape[1] * 2, x.shape[2] * 2, x.shape[3]], method=jax.image.ResizeMethod.LINEAR)
     decoder = hk.Sequential([
+        hk.LayerNorm(axis=1, create_scale=True, create_offset=True),
+        hk.Linear(128), jax.nn.elu,
+        hk.LayerNorm(axis=1, create_scale=True, create_offset=True),
         hk.Reshape([2, 2, -1]),
         upsample,
         hk.Conv2D(32, kernel_shape=3, padding='SAME'), jax.nn.elu,
@@ -217,14 +220,18 @@ def main():
 
     # Make datasets.
     train_dataset = load_dataset("train", shuffle=True, batch_size=256)
-    eval_dataset =  load_dataset("test", shuffle=False, batch_size=1_000)
+    eval_dataset = load_dataset("test", shuffle=False, batch_size=1_000)
 
-    # Initialise network and optimiser; note we draw an input to get shapes.
-    initial_params = network.init(jax.random.PRNGKey(seed=0), next(train_dataset).input_image)
-    initial_opt_state = optimiser.init(initial_params)
-    state = TrainingState(initial_params, initial_params, initial_opt_state)
+    if True:
 
-    state = load_ckpt(f'./out/im2im/baseline/010.pkl')
+        # Initialise network and optimiser; note we draw an input to get shapes.
+        initial_params = network.init(jax.random.PRNGKey(seed=0),next(train_dataset).input_image)
+        initial_opt_state = optimiser.init(initial_params)
+        state = TrainingState(initial_params, initial_params, initial_opt_state)
+
+    else:
+
+        state = load_ckpt(f'./out/im2im/ln-linear-ln-in-dec/010.pkl')
 
     initial_step = state.opt_state[-1][0].count
     for step in range(initial_step, 100_001):
