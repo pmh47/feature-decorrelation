@@ -15,7 +15,7 @@ from main_jax import get_logistic_regression_loss, get_logistic_regression_accur
 
 
 NUM_CLASSES = 10
-out_dir = './out/im2im/ln-linear-ln-in-dec'
+out_dir = './out/im2im/ln-linear-ln-in-dec_bg-only'
 
 
 class Batch(NamedTuple):
@@ -100,8 +100,12 @@ digit_patches = [
 digit_patches = jax.image.resize(jnp.asarray(digit_patches), [len(digit_patches), 10, 6], jax.image.ResizeMethod.NEAREST)[..., None]
 def make_batch(image, label):
     image = jnp.tile(image, [1, 1, 1, 3]).astype(jnp.float32) / 255.
-    input_image = image * 0.5 + (1 - image) * np.random.random(size=(image.shape[0], 1, 1, 3))
-    all_overlaid_images = jnp.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
+    bg_colour = np.random.random(size=(image.shape[0], 1, 1, 3))
+    input_image = image * 0.5 + (1 - image) * bg_colour
+    if True:
+        all_overlaid_images = jnp.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
+    else:
+        all_overlaid_images = jnp.tile(bg_colour[:, None], [1, digit_patches.shape[0], input_image.shape[1], input_image.shape[2], 1])
     all_overlaid_images = all_overlaid_images.at[:, :, -10:, -6:, :].set(jnp.where(digit_patches, 0.75, all_overlaid_images[:, :, -10:, -6:, :]))
     output_image = jax.vmap(lambda overlaid_images, L: overlaid_images[L])(all_overlaid_images, label)
     return Batch(input_image, label, output_image, all_overlaid_images)
