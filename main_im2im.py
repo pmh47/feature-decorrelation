@@ -14,8 +14,12 @@ import matplotlib.pyplot as plt
 from main_jax import get_logistic_regression_loss, get_logistic_regression_accuracy_skl
 
 
+prediction_mode = 'prototype-and-digit'  # 'prototype-and-bg'
+regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
+
+
 NUM_CLASSES = 10
-out_dir = './out/im2im/ln-linear-ln-in-dec_bg-only'
+out_dir = f'./out/im2im/ln-linear-ln-in-dec_{prediction_mode}_reg-{regularised_layer}'
 
 
 class Batch(NamedTuple):
@@ -102,10 +106,12 @@ def make_batch(image, label):
     image = jnp.tile(image, [1, 1, 1, 3]).astype(jnp.float32) / 255.
     bg_colour = np.random.random(size=(image.shape[0], 1, 1, 3))
     input_image = image * 0.5 + (1 - image) * bg_colour
-    if True:
+    if prediction_mode == 'prototype-and-digit':
         all_overlaid_images = jnp.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
-    else:
+    elif prediction_mode == 'prototype-and-bg':
         all_overlaid_images = jnp.tile(bg_colour[:, None], [1, digit_patches.shape[0], input_image.shape[1], input_image.shape[2], 1])
+    else:
+        raise NotImplementedError
     all_overlaid_images = all_overlaid_images.at[:, :, -10:, -6:, :].set(jnp.where(digit_patches, 0.75, all_overlaid_images[:, :, -10:, -6:, :]))
     output_image = jax.vmap(lambda overlaid_images, L: overlaid_images[L])(all_overlaid_images, label)
     return Batch(input_image, label, output_image, all_overlaid_images)
@@ -128,10 +134,10 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         hk.Conv2D(64, kernel_shape=3, stride=2), jax.nn.elu,
         hk.GroupNorm(8),
         hk.Flatten(),
-        hk.Linear(64), jax.nn.elu,
     ])
     upsample = lambda x: jax.image.resize(x, [x.shape[0], x.shape[1] * 2, x.shape[2] * 2, x.shape[3]], method=jax.image.ResizeMethod.LINEAR)
-    decoder = hk.Sequential([
+    decoder_layers = [
+        hk.Linear(64), jax.nn.elu,
         hk.LayerNorm(axis=1, create_scale=True, create_offset=True),
         hk.Linear(128), jax.nn.elu,
         hk.LayerNorm(axis=1, create_scale=True, create_offset=True),
@@ -148,10 +154,25 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         upsample,
         hk.Conv2D(16, kernel_shape=3, padding='SAME'), jax.nn.elu,
         hk.Conv2D(3, kernel_shape=1)
-    ])
-    embedding = encoder(images)
-    decoded = decoder(embedding)
-    return decoded, embedding
+    ]
+    if regularised_layer == 'bottleneck':
+        regularised_layer_idx = 1  # outputs of this layer are used for logistic regression
+    elif regularised_layer == 'dec-conv-1':
+        regularised_layer_idx = 10
+    elif regularised_layer == 'dec-conv-2':
+        regularised_layer_idx = 14
+    elif regularised_layer == 'dec-conv-3':
+        regularised_layer_idx = 18
+    elif regularised_layer == 'dec-conv-4':
+        regularised_layer_idx = 21
+    else:
+        raise NotImplementedError
+    decoder_start = hk.Sequential(decoder_layers[: regularised_layer_idx + 1])
+    decoder_end = hk.Sequential(decoder_layers[regularised_layer_idx + 1 :])
+    encoded = encoder(images)
+    for_regularisation = decoder_start(encoded)
+    decoded = decoder_end(for_regularisation)
+    return decoded, jnp.reshape(for_regularisation, [for_regularisation.shape[0], -1])
 
 
 def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Batch]:
@@ -255,7 +276,7 @@ def main():
 
         state, (recon_loss, lr_loss) = update(state, next(train_dataset))
         if jnp.isnan(recon_loss) or jnp.isnan(lr_loss):
-            raise RuntimeError('NaN loss')
+            raise RuntimeError(f'NaN loss at step {step}')
         if step % 100 == 0:
             print({"step": step, "learning_rate": f"{schedule(step):.1E}", "recon_loss": f"{recon_loss:.4f}", "lr_loss": f"{lr_loss:.4f}", "lr_loss_weight": f"{lr_weight_schedule(step):.1E}"})
 
