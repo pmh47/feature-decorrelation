@@ -1,5 +1,5 @@
 import os
-from typing import Iterator, NamedTuple
+from typing import Iterator, NamedTuple, Optional
 
 import haiku as hk
 import jax
@@ -16,6 +16,7 @@ from main_jax import get_logistic_regression_loss, get_logistic_regression_accur
 
 prediction_mode = 'prototype-and-digit'  # 'prototype-and-bg'
 regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
+regressor_training = 'single-step'  # 'full-opt'
 
 
 NUM_CLASSES = 10
@@ -123,6 +124,11 @@ class TrainingState(NamedTuple):
     opt_state: optax.OptState
 
 
+class AdversaryState(NamedTuple):
+    params: hk.Params
+    opt_state: optax.OptState
+
+
 def net_fn(images: jnp.ndarray) -> jnp.ndarray:
     encoder = hk.Sequential([
         hk.Conv2D(24, kernel_shape=3), jax.nn.elu,
@@ -175,6 +181,14 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
     return decoded, jnp.reshape(for_regularisation, [for_regularisation.shape[0], -1])
 
 
+def adversary_fn(embeddings: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
+    regressor = hk.Linear(NUM_CLASSES)
+    logits = regressor(embeddings)
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels).mean()
+    accuracy = (jnp.argmax(logits, axis=1) == labels).mean()
+    return loss, accuracy
+
+
 def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Batch]:
     ds = tfds.load("mnist:3.*.*", split=split).cache().repeat()
     if shuffle:
@@ -209,18 +223,37 @@ def main():
         end_value=0.,
     )
     optimiser = optax.chain(
-        optax.clip(2.),
+        optax.clip(0.1),
         optax.adamw(learning_rate=schedule, weight_decay=1.e-5),
     )
 
-    lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=5.e-4, transition_steps=100, transition_begin=10000)
+    if regressor_training == 'single-step':
+        adversary = hk.without_apply_rng(hk.transform(adversary_fn))
+        adversary_optimiser = optax.chain(
+            optax.clip(1.0),
+            optax.adam(learning_rate=1.e-2),
+        )
+        lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=1.e-3, transition_steps=100, transition_begin=0)
+    elif regressor_training == 'full-opt':
+        lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=5.e-4, transition_steps=100, transition_begin=10000)
 
-    def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric) -> jnp.ndarray:
+    def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric, maybe_adversary_params: Optional[hk.Params] = None) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         reconstruction_loss = jnp.mean(jnp.square(batch.output_image - prediction))
-        lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, get_logistic_regression_loss, lambda e, l: (0., 0.), embedding, batch.ordinal_label)
+        if regressor_training == 'full-opt':
+            lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, get_logistic_regression_loss, lambda e, l: (0., 0.), embedding, batch.ordinal_label)
+        elif regressor_training == 'single-step':
+            lr_loss, lr_accuracy = adversary.apply(maybe_adversary_params, embedding, batch.ordinal_label)
+            lr_loss *= lr_accuracy > 1 / NUM_CLASSES * 1.2  # i.e. do not push the LR loss to be arbitrarily bad if accuracy is already ~chance
+        else:
+            raise NotImplementedError
         lr_loss = -lr_loss * lr_loss_weight
-        return reconstruction_loss + lr_loss, (reconstruction_loss, lr_loss)
+        return reconstruction_loss + lr_loss, (reconstruction_loss, lr_loss, lr_accuracy)
+
+    def adversary_loss(params: hk.Params, batch: Batch, adversary_params: Optional[hk.Params] = None) -> jnp.ndarray:
+        _, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
+        lr_loss, lr_accuracy = adversary.apply(adversary_params, embedding, batch.ordinal_label)
+        return lr_loss
 
     @jax.jit
     def evaluate(params: hk.Params, batch: Batch) -> jnp.ndarray:
@@ -233,9 +266,9 @@ def main():
         return mse, accuracy, embedding, prediction[:8]
 
     @jax.jit
-    def update(state: TrainingState, batch: Batch) -> TrainingState:
+    def update(state: TrainingState, batch: Batch, maybe_adversary_state: Optional[AdversaryState]) -> TrainingState:
         lr_loss_weight = lr_weight_schedule(state.opt_state[-1][0].count)
-        grads, losses_for_logging = jax.grad(loss, has_aux=True)(state.params, batch, lr_loss_weight)
+        grads, losses_for_logging = jax.grad(loss, has_aux=True)(state.params, batch, lr_loss_weight, maybe_adversary_state.params if maybe_adversary_state else None)
         updates, opt_state = optimiser.update(grads, state.opt_state, params=state.params)
         params = optax.apply_updates(state.params, updates)
         # Compute avg_params, the exponential moving average of the "live" params.
@@ -243,16 +276,33 @@ def main():
         avg_params = optax.incremental_update(params, state.avg_params, step_size=0.001)
         return TrainingState(params, avg_params, opt_state), losses_for_logging
 
+    @jax.jit
+    def update_adversary(state: TrainingState, batch: Batch, adversary_state: AdversaryState) -> TrainingState:
+        grads = jax.grad(adversary_loss, argnums=2)(state.params, batch, adversary_state.params)
+        updates, opt_state = adversary_optimiser.update(grads, adversary_state.opt_state, params=adversary_state.params)
+        params = optax.apply_updates(adversary_state.params, updates)
+        return AdversaryState(params, opt_state)
+
     # Make datasets.
-    train_dataset = load_dataset("train", shuffle=True, batch_size=256)
-    eval_dataset = load_dataset("test", shuffle=False, batch_size=1_000)
+    small = regressor_training == 'full-opt'
+    train_dataset = load_dataset("train", shuffle=True, batch_size=256 if small else 1024)
+    eval_dataset = load_dataset("test", shuffle=False, batch_size=1000 if small else 10000)
 
     if True:
 
         # Initialise network and optimiser; note we draw an input to get shapes.
-        initial_params = network.init(jax.random.PRNGKey(seed=0),next(train_dataset).input_image)
+        rngs = jax.random.split(jax.random.PRNGKey(seed=0), 2)
+        initial_batch = next(train_dataset)
+        initial_params = network.init(rngs[0], initial_batch.input_image)
         initial_opt_state = optimiser.init(initial_params)
         state = TrainingState(initial_params, initial_params, initial_opt_state)
+        if regressor_training == 'single-step':
+            _, initial_embedding = network.apply(initial_params, initial_batch.input_image)
+            adversary_initial_params = adversary.init(rngs[1], initial_embedding, initial_batch.ordinal_label)
+            adversary_initial_opt_state = adversary_optimiser.init(adversary_initial_params)
+            maybe_adversary_state = AdversaryState(adversary_initial_params, adversary_initial_opt_state)
+        else:
+            maybe_adversary_state = None
 
     else:
 
@@ -274,11 +324,13 @@ def main():
                 plt.clf()
                 save_ckpt(state, step)
 
-        state, (recon_loss, lr_loss) = update(state, next(train_dataset))
+        state, (recon_loss, lr_loss, lr_accuracy) = update(state, next(train_dataset), maybe_adversary_state)
+        if regressor_training == 'single-step':
+            maybe_adversary_state = update_adversary(state, next(train_dataset), maybe_adversary_state)
         if jnp.isnan(recon_loss) or jnp.isnan(lr_loss):
             raise RuntimeError(f'NaN loss at step {step}')
         if step % 100 == 0:
-            print({"step": step, "learning_rate": f"{schedule(step):.1E}", "recon_loss": f"{recon_loss:.4f}", "lr_loss": f"{lr_loss:.4f}", "lr_loss_weight": f"{lr_weight_schedule(step):.1E}"})
+            print({"step": step, "learning_rate": f"{schedule(step):.1E}", "recon_loss": f"{recon_loss:.4f}", "lr_loss": f"{lr_loss:.4f}", "lr_accuracy": f"{lr_accuracy:.4f}", "lr_loss_weight": f"{lr_weight_schedule(step):.1E}"})
 
 
 if __name__ == '__main__':
