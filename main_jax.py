@@ -68,7 +68,7 @@ def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Ba
     return iter(ds)
 
 
-def get_logistic_regression_loss(embedding, labels, num_iterations=20):
+def get_logistic_regression_loss(embedding, labels, num_iterations=20, diff_thru_opt=True):
     # embedding :: iib, channel -> float32
     # labels :: iib -> int
 
@@ -109,6 +109,8 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20):
 
     # final_weight, final_bias = optimise_gd()
     final_weight, final_bias = optimise_jaxopt()
+    if not diff_thru_opt:
+        final_weight, final_bias = jax.lax.stop_gradient([final_weight, final_bias])
     final_logits = get_logits(final_weight, final_bias, embedding)
     final_loss = get_loss(final_logits, labels)
     final_accuracy = (jnp.argmax(final_logits, axis=1) == labels).mean()

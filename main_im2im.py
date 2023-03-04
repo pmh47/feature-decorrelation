@@ -1,4 +1,5 @@
 import os
+import functools
 from typing import Iterator, NamedTuple, Optional
 
 import haiku as hk
@@ -16,7 +17,7 @@ from main_jax import get_logistic_regression_loss, get_logistic_regression_accur
 
 prediction_mode = 'prototype-and-digit'  # 'prototype-and-bg'
 regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
-regressor_training = 'single-step'  # 'full-opt'
+regressor_training = 'detached-opt'  # 'full-opt', 'single-step'
 
 
 NUM_CLASSES = 10
@@ -236,12 +237,16 @@ def main():
         lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=1.e-3, transition_steps=100, transition_begin=0)
     elif regressor_training == 'full-opt':
         lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=5.e-4, transition_steps=100, transition_begin=10000)
+    elif regressor_training == 'detached-opt':
+        lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=5.e-4, transition_steps=100, transition_begin=0)
+    else:
+        raise NotImplementedError
 
     def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric, maybe_adversary_params: Optional[hk.Params] = None) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         reconstruction_loss = jnp.mean(jnp.square(batch.output_image - prediction))
-        if regressor_training == 'full-opt':
-            lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, get_logistic_regression_loss, lambda e, l: (0., 0.), embedding, batch.ordinal_label)
+        if regressor_training in ['full-opt', 'detached-opt']:
+            lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, functools.partial(get_logistic_regression_loss, diff_thru_opt=False), lambda e, l: (0., 0.), embedding, batch.ordinal_label)
         elif regressor_training == 'single-step':
             lr_loss, lr_accuracy = adversary.apply(maybe_adversary_params, embedding, batch.ordinal_label)
             lr_loss *= lr_accuracy > 1 / NUM_CLASSES * 1.2  # i.e. do not push the LR loss to be arbitrarily bad if accuracy is already ~chance
