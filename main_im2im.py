@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from main_jax import get_logistic_regression_loss, get_logistic_regression_accuracy_skl
 
 
-prediction_mode = 'prototype-and-digit'  # 'prototype-and-bg'
+prediction_mode = 'binary-and-bg'  # 'binary-and-digit'
 regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
 regressor_training = 'detached-opt'  # 'full-opt', 'single-step'
 
@@ -32,89 +32,29 @@ class Batch(NamedTuple):
 
 
 digit_patches = [
-    [
-        [1, 1, 1],
-        [1, 0, 1],
-        [1, 0, 1],
-        [1, 0, 1],
-        [1, 1, 1],
-    ],
-    [
-        [0, 1, 0],
-        [0, 1, 0],
-        [0, 1, 0],
-        [0, 1, 0],
-        [0, 1, 0],
-    ],
-    [
-        [1, 1,1],
-        [0, 0, 1],
-        [1, 1,1],
-        [1, 0, 0],
-        [1, 1, 1],
-    ],
-    [
-        [1, 1,1],
-        [0, 0, 1],
-        [1, 1,1],
-        [0, 0, 1],
-        [1, 1, 1],
-    ],
-    [
-        [1, 0,0],
-        [1, 0, 0],
-        [1, 0,1],
-        [1, 1, 1],
-        [0, 0, 1],
-    ],
-    [
-        [1, 1, 1],
-        [1, 0, 0],
-        [1, 1, 1],
-        [0, 0, 1],
-        [1, 1, 1],
-    ],
-    [
-        [1, 1, 1],
-        [1, 0, 0],
-        [1, 1, 1],
-        [1, 0, 1],
-        [1, 1, 1],
-    ],
-    [
-        [1, 1, 1],
-        [0, 0, 1],
-        [0, 0, 1],
-        [0, 1, 0],
-        [0, 1, 0],
-    ],
-    [
-        [1, 1, 1],
-        [1, 0, 1],
-        [1, 1, 1],
-        [1, 0, 1],
-        [1, 1, 1],
-    ],
-    [
-        [1, 1, 1],
-        [1, 0, 1],
-        [1, 1, 1],
-        [0, 0, 1],
-        [0, 0, 1],
-    ],
+    [[0, 0], [0, 0]],
+    [[0, 0], [0, 1]],
+    [[0, 0], [1, 0]],
+    [[0, 0], [1, 1]],
+    [[0, 1], [0, 0]],
+    [[0, 1], [0, 1]],
+    [[0, 1], [1, 0]],
+    [[0, 1], [1, 1]],
+    [[1, 0], [0, 0]],
+    [[1, 0], [0, 1]],
 ]
-digit_patches = jax.image.resize(jnp.asarray(digit_patches), [len(digit_patches), 10, 6], jax.image.ResizeMethod.NEAREST)[..., None]
+digit_patches = jax.image.resize(jnp.asarray(digit_patches), [len(digit_patches), 6, 6], jax.image.ResizeMethod.NEAREST)[..., None]
 def make_batch(image, label):
     image = jnp.tile(image, [1, 1, 1, 3]).astype(jnp.float32) / 255.
     bg_colour = np.random.random(size=(image.shape[0], 1, 1, 3))
-    input_image = image * 0.5 + (1 - image) * bg_colour
+    input_image = image * (1 - bg_colour) + (1 - image) * bg_colour
     if prediction_mode == 'prototype-and-digit':
         all_overlaid_images = jnp.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
     elif prediction_mode == 'prototype-and-bg':
         all_overlaid_images = jnp.tile(bg_colour[:, None], [1, digit_patches.shape[0], input_image.shape[1], input_image.shape[2], 1])
     else:
         raise NotImplementedError
-    all_overlaid_images = all_overlaid_images.at[:, :, -10:, -6:, :].set(jnp.where(digit_patches, 0.75, all_overlaid_images[:, :, -10:, -6:, :]))
+    all_overlaid_images = all_overlaid_images.at[:, :, -6:, -6:, :].set(jnp.where(digit_patches, 1 - bg_colour[:, None], all_overlaid_images[:, :, -6:, -6:, :]))
     output_image = jax.vmap(lambda overlaid_images, L: overlaid_images[L])(all_overlaid_images, label)
     return Batch(input_image, label, output_image, all_overlaid_images)
 
