@@ -21,7 +21,7 @@ regressor_training = 'detached-opt'  # 'full-opt', 'single-step'
 
 
 NUM_CLASSES = 10
-out_dir = f'./out/im2im/ln-linear-ln-in-dec_{prediction_mode}_reg-{regularised_layer}'
+out_dir = f'./out/im2im/ln-linear-ln-in-dec_{prediction_mode}_reg-{regularised_layer}_{regressor_training}'
 
 
 class Batch(NamedTuple):
@@ -312,6 +312,14 @@ def main():
     else:
 
         state = load_ckpt(f'./out/im2im/ln-linear-ln-in-dec/010.pkl')
+
+    if False:
+        val_batch = next(eval_dataset)
+        output_to_class_accuracy = get_logistic_regression_accuracy_skl(jnp.reshape(val_batch.output_image, [val_batch.output_image.shape[0], -1]), val_batch.ordinal_label)
+        print(f'output_to_class_accuracy = {output_to_class_accuracy:.3f}')
+        input_to_class_accuracy = get_logistic_regression_accuracy_skl(jnp.reshape(val_batch.input_image, [val_batch.input_image.shape[0], -1]), val_batch.ordinal_label)
+        print(f'input_to_class_accuracy = {input_to_class_accuracy:.3f}')
+        return
 
     initial_step = state.opt_state[-1][0].count
     for step in range(initial_step, 100_001):
