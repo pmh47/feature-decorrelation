@@ -318,11 +318,23 @@ def main():
         state = load_ckpt(f'./out/im2im/ln-linear-ln-in-dec/010.pkl')
 
     if False:
+        import sklearn.linear_model
+        train_in_images, train_labels, train_out_images, _ = zip(*[
+            next(train_dataset)
+            for _ in range(10)
+        ])
+        train_in_images = np.concatenate(train_in_images, axis=0)
+        train_out_images = np.concatenate(train_out_images, axis=0)
+        train_labels = np.concatenate(train_labels, axis=0)
         val_batch = next(eval_dataset)
-        output_to_class_accuracy = get_logistic_regression_accuracy_skl(jnp.reshape(val_batch.output_image, [val_batch.output_image.shape[0], -1]), val_batch.ordinal_label)
-        print(f'output_to_class_accuracy = {output_to_class_accuracy:.3f}')
-        input_to_class_accuracy = get_logistic_regression_accuracy_skl(jnp.reshape(val_batch.input_image, [val_batch.input_image.shape[0], -1]), val_batch.ordinal_label)
-        print(f'input_to_class_accuracy = {input_to_class_accuracy:.3f}')
+        regressor = sklearn.linear_model.LogisticRegression(random_state=0, multi_class='multinomial')
+        regressor.fit(train_out_images.reshape([train_out_images.shape[0], -1]), train_labels)
+        val_predictions = regressor.predict(val_batch.output_image.reshape([val_batch.output_image.shape[0], -1]))
+        print(f'output_to_class_accuracy = {(val_predictions == val_batch.ordinal_label).mean():.3f}')
+        regressor = sklearn.linear_model.LogisticRegression(random_state=0, multi_class='multinomial')
+        regressor.fit(train_in_images.reshape([train_in_images.shape[0], -1]), train_labels)
+        val_predictions = regressor.predict(val_batch.input_image.reshape([val_batch.input_image.shape[0], -1]))
+        print(f'input_to_class_accuracy = {(val_predictions == val_batch.ordinal_label).mean():.3f}')
         return
 
     initial_step = state.opt_state[-1][0].count
