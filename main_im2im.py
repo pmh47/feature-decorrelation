@@ -17,7 +17,7 @@ from main_jax import get_logistic_regression_loss, get_logistic_regression_accur
 
 prediction_mode = 'prototype-and-digit'  # 'prototype-and-bg'
 regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
-regressor_training = 'detached-opt'  # 'full-opt', 'single-step'
+regressor_training = 'detached-opt'  # 'full-opt', 'single-step', 'none'
 
 
 NUM_CLASSES = 10
@@ -239,6 +239,8 @@ def main():
         lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=5.e-4, transition_steps=100, transition_begin=10000)
     elif regressor_training == 'detached-opt':
         lr_weight_schedule = optax.linear_schedule(init_value=0., end_value=5.e-4, transition_steps=100, transition_begin=0)
+    elif regressor_training == 'none':
+        lr_weight_schedule = lambda _: 0.
     else:
         raise NotImplementedError
 
@@ -250,6 +252,8 @@ def main():
         elif regressor_training == 'single-step':
             lr_loss, lr_accuracy = adversary.apply(maybe_adversary_params, embedding, batch.ordinal_label)
             lr_loss *= lr_accuracy > 1 / NUM_CLASSES * 1.2  # i.e. do not push the LR loss to be arbitrarily bad if accuracy is already ~chance
+        elif regressor_training == 'none':
+            lr_loss = lr_accuracy = 0.
         else:
             raise NotImplementedError
         lr_loss = -lr_loss * lr_loss_weight
