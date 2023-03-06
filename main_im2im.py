@@ -11,6 +11,7 @@ import chex
 import pickle
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
+import sklearn.linear_model
 
 from main_jax import get_logistic_regression_loss, get_logistic_regression_accuracy_skl
 
@@ -318,7 +319,6 @@ def main():
         state = load_ckpt(f'./out/im2im/ln-linear-ln-in-dec/010.pkl')
 
     if False:
-        import sklearn.linear_model
         train_in_images, train_labels, train_out_images, _ = zip(*[
             next(train_dataset)
             for _ in range(10)
@@ -340,13 +340,23 @@ def main():
     initial_step = state.opt_state[-1][0].count
     for step in range(initial_step, 100_001):
         if step % 100 == 0:
-            batch = next(eval_dataset)
-            mse, accuracy, embedding, first_predictions = map(np.array, evaluate(state.avg_params, batch))
+            val_batch = next(eval_dataset)
+            mse, accuracy, val_embedding, first_predictions = map(np.array, evaluate(state.avg_params, val_batch))
             print({"step": step, "mse": f"{mse:.4f}", "accuracy": f"{accuracy:.3f}"})
             if step % 1000 == 0:
-                lr_accuracy_skl = get_logistic_regression_accuracy_skl(embedding, batch.ordinal_label)
+                train_in_images, train_labels, _, _ = zip(*[
+                    next(train_dataset)
+                    for _ in range(50)  # ** this should use the *whole* dataset, not just 50 batches!
+                ])
+                train_in_images = np.concatenate(train_in_images, axis=0)
+                train_labels = np.concatenate(train_labels, axis=0)
+                _, train_embedding = network.apply(state.avg_params, train_in_images)
+                regressor = sklearn.linear_model.LogisticRegression(random_state=0, multi_class='multinomial')
+                regressor.fit(train_embedding, train_labels)
+                val_predictions = regressor.predict(val_embedding)
+                lr_accuracy_skl = (val_predictions == val_batch.ordinal_label).mean()
                 print({"step": step, "lr_accuracy_skl": f"{lr_accuracy_skl:3f}"})
-                plt.imshow(jnp.reshape(jnp.concatenate([batch.input_image[:first_predictions.shape[0]], batch.output_image[:first_predictions.shape[0]], first_predictions], axis=2), [-1, batch.input_image.shape[2] * 3, 3]))
+                plt.imshow(jnp.reshape(jnp.concatenate([val_batch.input_image[:first_predictions.shape[0]], val_batch.output_image[:first_predictions.shape[0]], first_predictions], axis=2), [-1, val_batch.input_image.shape[2] * 3, 3]))
                 plt.title(f'step {step}')
                 os.makedirs(out_dir, exist_ok=True)
                 plt.savefig(f'{out_dir}/{step // 1000:03}.png')
