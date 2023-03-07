@@ -12,6 +12,7 @@ import pickle
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 import sklearn.linear_model
+from tqdm import tqdm
 
 from main_jax import get_logistic_regression_loss, get_logistic_regression_accuracy_skl
 
@@ -276,6 +277,11 @@ def main():
         return mse, accuracy, embedding, prediction[:8]
 
     @jax.jit
+    def get_batch_embeddings_and_labels(state: TrainingState, batch: Batch):
+        _, embedding = network.apply(state.avg_params, batch.input_image)
+        return embedding, batch.ordinal_label
+
+    @jax.jit
     def update(state: TrainingState, batch: Batch, maybe_adversary_state: Optional[AdversaryState]) -> TrainingState:
         lr_loss_weight = lr_weight_schedule(state.opt_state[-1][0].count)
         grads, losses_for_logging = jax.grad(loss, has_aux=True)(state.params, batch, lr_loss_weight, maybe_adversary_state.params if maybe_adversary_state else None)
@@ -344,13 +350,12 @@ def main():
             mse, accuracy, val_embedding, first_predictions = map(np.array, evaluate(state.avg_params, val_batch))
             print({"step": step, "mse": f"{mse:.4f}", "accuracy": f"{accuracy:.3f}"})
             if step % 1000 == 0:
-                train_in_images, train_labels, _, _ = zip(*[
-                    next(train_dataset)
-                    for _ in range(50)  # ** this should use the *whole* dataset, not just 50 batches!
+                train_embedding, train_labels = zip(*[
+                    get_batch_embeddings_and_labels(state, next(train_dataset))
+                    for _ in tqdm(range(50), 'calculating training embeddings')  # ** this should use the *whole* dataset, not just 50 batches!
                 ])
-                train_in_images = np.concatenate(train_in_images, axis=0)
-                train_labels = np.concatenate(train_labels, axis=0)
-                _, train_embedding = network.apply(state.avg_params, train_in_images)
+                train_embedding = jnp.concatenate(train_embedding, axis=0)
+                train_labels = jnp.concatenate(train_labels, axis=0)
                 regressor = sklearn.linear_model.LogisticRegression(random_state=0, multi_class='multinomial')
                 regressor.fit(train_embedding, train_labels)
                 val_predictions = regressor.predict(val_embedding)
