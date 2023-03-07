@@ -17,13 +17,13 @@ from tqdm import tqdm
 from main_jax import get_logistic_regression_loss, get_logistic_regression_accuracy_skl
 
 
-prediction_mode = 'prototype-and-digit'  # 'prototype-and-bg'
+prediction_mode = 'prototype-and-bg'  # 'prototype-and-digit'
 regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
 regressor_training = 'detached-opt'  # 'full-opt', 'single-step', 'none'
 
 
 NUM_CLASSES = 10
-out_dir = f'./out/im2im/ln-linear-ln-in-dec_{prediction_mode}_reg-{regularised_layer}_{regressor_training}'
+out_dir = f'./out/im2im/ln-linear-ln-in-dec_shifted_{prediction_mode}_reg-{regularised_layer}_{regressor_training}'
 
 
 class Batch(NamedTuple):
@@ -107,18 +107,29 @@ digit_patches = [
 ]
 digit_patches = jax.image.resize(jnp.asarray(digit_patches), [len(digit_patches), 10, 6], jax.image.ResizeMethod.NEAREST)[..., None]
 def make_batch(image, label):
-    image = jnp.tile(image, [1, 1, 1, 3]).astype(jnp.float32) / 255.
+    image = np.tile(image, [1, 1, 1, 3]).astype(np.float32) / 255.
     bg_colour = np.random.random(size=(image.shape[0], 1, 1, 3))
     input_image = image * 0.5 + (1 - image) * bg_colour
     if prediction_mode == 'prototype-and-digit':
-        all_overlaid_images = jnp.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
+        all_overlaid_images = np.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
     elif prediction_mode == 'prototype-and-bg':
-        all_overlaid_images = jnp.tile(bg_colour[:, None], [1, digit_patches.shape[0], input_image.shape[1], input_image.shape[2], 1])
+        all_overlaid_images = np.tile(bg_colour[:, None], [1, digit_patches.shape[0], input_image.shape[1], input_image.shape[2], 1])
     else:
         raise NotImplementedError
-    all_overlaid_images = all_overlaid_images.at[:, :, -10:, -6:, :].set(jnp.where(digit_patches, 0.75, all_overlaid_images[:, :, -10:, -6:, :]))
-    output_image = jax.vmap(lambda overlaid_images, L: overlaid_images[L])(all_overlaid_images, label)
-    return Batch(input_image, label, output_image, all_overlaid_images)
+    all_overlaid_images[:, :, -11:-1, -7:-1, :] = np.where(digit_patches, 0.75, all_overlaid_images[:, :, -11:-1, -7:-1, :])
+    canvas_h = canvas_w = 40
+    tops = np.random.randint(canvas_h - all_overlaid_images.shape[2], size=[image.shape[0]])
+    lefts = np.random.randint(canvas_w - all_overlaid_images.shape[3], size=[image.shape[0]])
+    input_image[:, -3:, -3:] = 1.  # marker at bottom right of input digits
+    input_image_padded = np.empty([input_image.shape[0], canvas_h, canvas_w, 3], dtype=np.float32)
+    all_overlaid_images_padded = np.empty([input_image.shape[0], NUM_CLASSES, canvas_h, canvas_w, 3], dtype=np.float32)
+    for idx in range(input_image.shape[0]):
+        input_image_padded[idx] = bg_colour[idx]
+        input_image_padded[idx, tops[idx] : tops[idx] + input_image.shape[1], lefts[idx] : lefts[idx] + input_image.shape[2]] = input_image[idx]
+        all_overlaid_images_padded[idx] = bg_colour[idx]
+        all_overlaid_images_padded[idx, :, tops[idx]: tops[idx] + input_image.shape[1], lefts[idx]: lefts[idx] + input_image.shape[2]] = all_overlaid_images[idx]
+    output_image = np.asarray([overlaid_images[L] for (overlaid_images, L) in zip(all_overlaid_images_padded, label)], dtype=np.float32)
+    return Batch(input_image_padded, label, output_image, all_overlaid_images_padded)
 
 
 class TrainingState(NamedTuple):
@@ -154,11 +165,11 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         upsample,
         hk.Conv2D(32, kernel_shape=3, padding='SAME'), jax.nn.elu,
         hk.GroupNorm(4),
-        upsample,
-        hk.Conv2D(32, kernel_shape=3, padding='SAME'), jax.nn.elu,
+        lambda x: jax.image.resize(x, [x.shape[0], x.shape[1] * 3, x.shape[2] * 3, x.shape[3]], method=jax.image.ResizeMethod.LINEAR),
+        hk.Conv2D(32, kernel_shape=3, padding='VALID'), jax.nn.elu,
         hk.GroupNorm(4),
         upsample,
-        hk.Conv2D(24, kernel_shape=3, padding='VALID'), jax.nn.elu,
+        hk.Conv2D(24, kernel_shape=3, padding='SAME'), jax.nn.elu,
         hk.GroupNorm(4),
         upsample,
         hk.Conv2D(16, kernel_shape=3, padding='SAME'), jax.nn.elu,
@@ -301,8 +312,8 @@ def main():
 
     # Make datasets.
     small = regressor_training == 'full-opt'
-    train_dataset = load_dataset("train", shuffle=True, batch_size=256 if small else 1024)
-    eval_dataset = load_dataset("test", shuffle=False, batch_size=1000 if small else 10000)
+    train_dataset = load_dataset("train", shuffle=True, batch_size=256 if small else 512)
+    eval_dataset = load_dataset("test", shuffle=False, batch_size=1000 if small else 5000)
 
     if True:
 
