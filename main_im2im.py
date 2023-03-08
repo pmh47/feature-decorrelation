@@ -20,10 +20,12 @@ from main_jax import get_logistic_regression_loss, get_logistic_regression_accur
 prediction_mode = 'prototype-and-bg'  # 'prototype-and-digit'
 regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
 regressor_training = 'detached-opt'  # 'full-opt', 'single-step', 'none'
+fg_colour = 'grey'  # 'inverse', 'grey'
+canvas_size = 40
 
 
 NUM_CLASSES = 10
-out_dir = f'./out/im2im/ln-linear-ln-in-dec_shifted_{prediction_mode}_reg-{regularised_layer}_{regressor_training}'
+out_dir = f'./out/im2im/ln-linear-ln-in-dec_shifted-{canvas_size}-{fg_colour}_{prediction_mode}_reg-{regularised_layer}_{regressor_training}'
 
 
 class Batch(NamedTuple):
@@ -109,17 +111,19 @@ digit_patches = jax.image.resize(jnp.asarray(digit_patches), [len(digit_patches)
 def make_batch(image, label):
     image = np.tile(image, [1, 1, 1, 3]).astype(np.float32) / 255.
     bg_colour = np.random.random(size=(image.shape[0], 1, 1, 3))
-    input_image = image * 0.5 + (1 - image) * bg_colour
+    digit_colour = 1 - bg_colour if fg_colour == 'inverse' else 0.5
+    input_image = image * digit_colour + (1 - image) * bg_colour
     if prediction_mode == 'prototype-and-digit':
         all_overlaid_images = np.tile(input_image[:, None], [1, digit_patches.shape[0], 1, 1, 1])
     elif prediction_mode == 'prototype-and-bg':
         all_overlaid_images = np.tile(bg_colour[:, None], [1, digit_patches.shape[0], input_image.shape[1], input_image.shape[2], 1])
     else:
         raise NotImplementedError
-    all_overlaid_images[:, :, -11:-1, -7:-1, :] = np.where(digit_patches, 0.75, all_overlaid_images[:, :, -11:-1, -7:-1, :])
-    canvas_h = canvas_w = 40
-    tops = np.random.randint(canvas_h - all_overlaid_images.shape[2], size=[image.shape[0]])
-    lefts = np.random.randint(canvas_w - all_overlaid_images.shape[3], size=[image.shape[0]])
+    prototype_colour = 1 - bg_colour[:, None] if fg_colour == 'inverse' else 0.75
+    all_overlaid_images[:, :, -11:-1, -7:-1, :] = np.where(digit_patches, prototype_colour, all_overlaid_images[:, :, -11:-1, -7:-1, :])
+    canvas_h = canvas_w = canvas_size
+    tops = np.random.randint(canvas_h - all_overlaid_images.shape[2], size=[image.shape[0]]) if canvas_h - all_overlaid_images.shape[2] > 0 else np.zeros([image.shape[0]], dtype=np.int32)
+    lefts = np.random.randint(canvas_w - all_overlaid_images.shape[3], size=[image.shape[0]]) if canvas_w - all_overlaid_images.shape[3] > 0 else np.zeros([image.shape[0]], dtype=np.int32)
     input_image[:, -3:, -3:] = 1.  # marker at bottom right of input digits
     input_image_padded = np.empty([input_image.shape[0], canvas_h, canvas_w, 3], dtype=np.float32)
     all_overlaid_images_padded = np.empty([input_image.shape[0], NUM_CLASSES, canvas_h, canvas_w, 3], dtype=np.float32)
