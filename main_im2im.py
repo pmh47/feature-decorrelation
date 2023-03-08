@@ -363,7 +363,7 @@ def main():
             if step % 1000 == 0:
                 train_embedding, train_labels = zip(*[
                     get_batch_embeddings_and_labels(state, next(train_dataset))
-                    for _ in tqdm(range(50), 'calculating training embeddings')  # ** this should use the *whole* dataset, not just 50 batches!
+                    for _ in tqdm(range(20), 'calculating training embeddings')  # ** this should use the *whole* dataset, not just 20 batches!
                 ])
                 train_embedding = jnp.concatenate(train_embedding, axis=0)
                 train_labels = jnp.concatenate(train_labels, axis=0)
