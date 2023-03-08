@@ -12,6 +12,7 @@ import pickle
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 import sklearn.linear_model
+import sklearn.decomposition
 from tqdm import tqdm
 
 from main_jax import get_logistic_regression_loss, get_logistic_regression_accuracy_skl
@@ -22,6 +23,7 @@ regularised_layer = 'bottleneck'  # 'bottleneck', 'dec-conv-{1-4}
 regressor_training = 'detached-opt'  # 'full-opt', 'single-step', 'none'
 fg_colour = 'grey'  # 'inverse', 'grey'
 canvas_size = 40
+pca_cpts = None  # None => don't use PCA
 
 
 NUM_CLASSES = 10
@@ -264,6 +266,10 @@ def main():
     def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric, maybe_adversary_params: Optional[hk.Params] = None) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         reconstruction_loss = jnp.mean(jnp.square(batch.output_image - prediction))
+        if regressor_training != 'none' and pca_cpts is not None and pca_cpts < embedding.shape[1]:
+            embedding -= embedding.mean(axis=0)
+            u, s, vT = jnp.linalg.svd(jax.lax.stop_gradient(embedding))
+            embedding @= vT[:pca_cpts].T
         if regressor_training in ['full-opt', 'detached-opt']:
             lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, functools.partial(get_logistic_regression_loss, diff_thru_opt=False), lambda e, l: (0., 0.), embedding, batch.ordinal_label)
         elif regressor_training == 'single-step':
@@ -339,6 +345,23 @@ def main():
 
         state = load_ckpt(f'./out/im2im/ln-linear-ln-in-dec/010.pkl')
 
+    if False:  # sanity-check that our jax pca matches sklearn
+        wibl = np.random.random([512, 6000])  # batch * feats
+        cpts = 500
+        pca = sklearn.decomposition.PCA(cpts)
+        pca.fit(wibl)
+        wibl_reduced = pca.transform(wibl)
+        print('skl:')
+        print(wibl_reduced.shape)
+        print(wibl_reduced)
+        mu = wibl.mean(axis=0)
+        u, s, vT = jnp.linalg.svd(wibl - mu)
+        wibl_reduced_jax = (wibl - mu) @ vT[:cpts].T
+        print('jax:')
+        print(wibl_reduced_jax.shape)
+        print(wibl_reduced_jax)
+        return
+
     if False:
         train_in_images, train_labels, train_out_images, _ = zip(*[
             next(train_dataset)
@@ -371,6 +394,11 @@ def main():
                 ])
                 train_embedding = jnp.concatenate(train_embedding, axis=0)
                 train_labels = jnp.concatenate(train_labels, axis=0)
+                if pca_cpts is not None and pca_cpts < train_embedding.shape[1]:
+                    pca = sklearn.decomposition.PCA(pca_cpts)
+                    pca.fit(train_embedding)
+                    train_embedding = pca.transform(train_embedding)
+                    val_embedding = pca.transform(val_embedding)
                 regressor = sklearn.linear_model.LogisticRegression(random_state=0, multi_class='multinomial')
                 regressor.fit(train_embedding, train_labels)
                 val_predictions = regressor.predict(val_embedding)
