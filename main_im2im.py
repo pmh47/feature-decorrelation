@@ -263,22 +263,32 @@ def main():
     else:
         raise NotImplementedError
 
-    def loss(params: hk.Params, batch: Batch, lr_loss_weight: chex.Numeric, maybe_adversary_params: Optional[hk.Params] = None) -> jnp.ndarray:
+    def loss(params: hk.Params, batch: Batch, batch_for_lr_training: Batch, lr_loss_weight: chex.Numeric, maybe_adversary_params: Optional[hk.Params] = None) -> jnp.ndarray:
         prediction, embedding = network.apply(params, batch.input_image)  # iib, char-in-seq, char-in-alphabet
         reconstruction_loss = jnp.mean(jnp.square(batch.output_image - prediction))
-        if regressor_training != 'none' and pca_cpts is not None and pca_cpts < embedding.shape[1]:
-            embedding -= embedding.mean(axis=0)
-            u, s, vT = jnp.linalg.svd(jax.lax.stop_gradient(embedding))
-            embedding @= vT[:pca_cpts].T
-        if regressor_training in ['full-opt', 'detached-opt']:
-            lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, functools.partial(get_logistic_regression_loss, diff_thru_opt=False), lambda e, l: (0., 0.), embedding, batch.ordinal_label)
-        elif regressor_training == 'single-step':
-            lr_loss, lr_accuracy = adversary.apply(maybe_adversary_params, embedding, batch.ordinal_label)
-            lr_loss *= lr_accuracy > 1 / NUM_CLASSES * 1.2  # i.e. do not push the LR loss to be arbitrarily bad if accuracy is already ~chance
-        elif regressor_training == 'none':
-            lr_loss = lr_accuracy = 0.
+        if regressor_training != 'none':
+            if batch_for_lr_training is None:
+                lr_train_embedding = embedding
+                lr_train_labels = batch.ordinal_label
+            else:
+                _, lr_train_embedding = jax.lax.stop_gradient(network.apply(params, batch_for_lr_training.input_image))
+                lr_train_labels = batch_for_lr_training.ordinal_label
+            if pca_cpts is not None and pca_cpts < lr_train_embedding.shape[1]:
+                embedding_mean = lr_train_embedding.mean(axis=0)
+                lr_train_embedding -= embedding_mean
+                u, s, vT = jnp.linalg.svd(jax.lax.stop_gradient(lr_train_embedding))
+                lr_train_embedding @= vT[:pca_cpts].T
+                embedding = (embedding - embedding_mean) @ vT[:pca_cpts].T
+            if regressor_training in ['full-opt', 'detached-opt']:
+                lr_loss, lr_accuracy = jax.lax.cond(lr_loss_weight != 0, functools.partial(get_logistic_regression_loss, diff_thru_opt=False), lambda te, tl, ve, vl: (0., 0.), lr_train_embedding, lr_train_labels, embedding, batch.ordinal_label)
+            elif regressor_training == 'single-step':
+                assert batch_for_lr_training is None  # not quite clear what to do in this case!
+                lr_loss, lr_accuracy = adversary.apply(maybe_adversary_params, lr_train_embedding, batch.ordinal_label)
+            else:
+                raise NotImplementedError
+            # lr_loss *= lr_accuracy > 1 / NUM_CLASSES * 1.2  # i.e. do not push the LR loss to be arbitrarily bad if accuracy is already ~chance
         else:
-            raise NotImplementedError
+            lr_loss = lr_accuracy = 0.
         lr_loss = -lr_loss * lr_loss_weight
         return reconstruction_loss + lr_loss, (reconstruction_loss, lr_loss, lr_accuracy)
 
@@ -303,9 +313,9 @@ def main():
         return embedding, batch.ordinal_label
 
     @jax.jit
-    def update(state: TrainingState, batch: Batch, maybe_adversary_state: Optional[AdversaryState]) -> TrainingState:
+    def update(state: TrainingState, batch: Batch, batch_for_lr_training: Batch, maybe_adversary_state: Optional[AdversaryState]) -> TrainingState:
         lr_loss_weight = lr_weight_schedule(state.opt_state[-1][0].count)
-        grads, losses_for_logging = jax.grad(loss, has_aux=True)(state.params, batch, lr_loss_weight, maybe_adversary_state.params if maybe_adversary_state else None)
+        grads, losses_for_logging = jax.grad(loss, has_aux=True)(state.params, batch, batch_for_lr_training, lr_loss_weight, maybe_adversary_state.params if maybe_adversary_state else None)
         updates, opt_state = optimiser.update(grads, state.opt_state, params=state.params)
         params = optax.apply_updates(state.params, updates)
         # Compute avg_params, the exponential moving average of the "live" params.
@@ -382,6 +392,7 @@ def main():
         return
 
     initial_step = state.opt_state[-1][0].count
+    previous_batch = next(train_dataset)
     for step in range(initial_step, 100_001):
         if step % 100 == 0:
             val_batch = next(eval_dataset)
@@ -411,7 +422,9 @@ def main():
                 plt.clf()
                 save_ckpt(state, step)
 
-        state, (recon_loss, lr_loss, lr_accuracy) = update(state, next(train_dataset), maybe_adversary_state)
+        batch = next(train_dataset)
+        state, (recon_loss, lr_loss, lr_accuracy) = update(state, batch, previous_batch, maybe_adversary_state)
+        previous_batch = batch
         if regressor_training == 'single-step':
             maybe_adversary_state = update_adversary(state, next(train_dataset), maybe_adversary_state)
         if jnp.isnan(recon_loss) or jnp.isnan(lr_loss):

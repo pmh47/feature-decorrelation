@@ -68,7 +68,7 @@ def load_dataset(split: str, *, shuffle: bool, batch_size: int, ) -> Iterator[Ba
     return iter(ds)
 
 
-def get_logistic_regression_loss(embedding, labels, num_iterations=20, diff_thru_opt=True):
+def get_logistic_regression_loss(train_embedding, train_labels, val_embedding, val_labels, num_iterations=20, diff_thru_opt=True):
     # embedding :: iib, channel -> float32
     # labels :: iib -> int
 
@@ -91,30 +91,30 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20, diff_thru
         return get_loss(logits, labels)
 
     def optimise_gd():
-        weight = jnp.zeros([embedding.shape[-1], NUM_CLASSES])
+        weight = jnp.zeros([train_embedding.shape[-1], NUM_CLASSES])
         bias = jnp.zeros([NUM_CLASSES])
         lr = 4.e-2
         grad_loss = jax.grad(get_loss_from_packed_params)
         for _ in range(num_iterations):
-            grad_wrt_weight_and_bias = grad_loss(pack(weight, bias), embedding, labels)
+            grad_wrt_weight_and_bias = grad_loss(pack(weight, bias), train_embedding, train_labels)
             grad_wrt_weight, grad_wrt_bias = unpack(grad_wrt_weight_and_bias)
             weight -= lr * grad_wrt_weight
             bias -= lr * grad_wrt_bias
         return weight, bias
 
     def optimise_jaxopt():
-        solver = jaxopt.BFGS(get_loss_from_packed_params, maxiter=100)
-        params, state = solver.run(init_params=jnp.zeros([embedding.shape[-1] + 1, NUM_CLASSES]), embedding=embedding, labels=labels)
+        solver = jaxopt.LBFGS(get_loss_from_packed_params, maxiter=100)
+        params, state = solver.run(init_params=jnp.zeros([train_embedding.shape[-1] + 1, NUM_CLASSES]), embedding=train_embedding, labels=train_labels)
         return unpack(params)
 
     # final_weight, final_bias = optimise_gd()
     final_weight, final_bias = optimise_jaxopt()
     if not diff_thru_opt:
         final_weight, final_bias = jax.lax.stop_gradient([final_weight, final_bias])
-    final_logits = get_logits(final_weight, final_bias, embedding)
-    final_loss = get_loss(final_logits, labels)
-    final_accuracy = (jnp.argmax(final_logits, axis=1) == labels).mean()
-    return final_loss, final_accuracy
+    val_logits = get_logits(final_weight, final_bias, val_embedding)
+    val_loss = get_loss(val_logits, val_labels)
+    val_accuracy = (jnp.argmax(val_logits, axis=1) == val_labels).mean()
+    return val_loss, val_accuracy
 
 
 def get_logistic_regression_accuracy_skl(embedding, labels, max_num_iterations=2000):
