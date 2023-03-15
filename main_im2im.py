@@ -161,7 +161,7 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         hk.GroupNorm(8),
         hk.Flatten(),
     ])
-    upsample = lambda x: jax.image.resize(x, [x.shape[0], x.shape[1] * 2, x.shape[2] * 2, x.shape[3]], method=jax.image.ResizeMethod.LINEAR)
+    upsample = lambda x, factor=2: jax.image.resize(x, [x.shape[0], x.shape[1] * factor, x.shape[2] * factor, x.shape[3]], method=jax.image.ResizeMethod.LINEAR)
     decoder_layers = [
         hk.Linear(64), jax.nn.elu,
         hk.LayerNorm(axis=1, create_scale=True, create_offset=True),
@@ -171,7 +171,7 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
         upsample,
         hk.Conv2D(32, kernel_shape=3, padding='SAME'), jax.nn.elu,
         hk.GroupNorm(4),
-        lambda x: jax.image.resize(x, [x.shape[0], x.shape[1] * 3, x.shape[2] * 3, x.shape[3]], method=jax.image.ResizeMethod.LINEAR),
+        functools.partial(upsample, factor=3),
         hk.Conv2D(32, kernel_shape=3, padding='VALID'), jax.nn.elu,
         hk.GroupNorm(4),
         upsample,
