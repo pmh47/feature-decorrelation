@@ -103,7 +103,7 @@ def get_logistic_regression_loss(embedding, labels, num_iterations=20, diff_thru
         return weight, bias
 
     def optimise_jaxopt():
-        solver = jaxopt.BFGS(get_loss_from_packed_params, maxiter=100)
+        solver = jaxopt.LBFGS(get_loss_from_packed_params, maxiter=100)
         params, state = solver.run(init_params=jnp.zeros([embedding.shape[-1] + 1, NUM_CLASSES]), embedding=embedding, labels=labels)
         return unpack(params)
 
