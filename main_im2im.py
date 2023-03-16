@@ -164,9 +164,6 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
     upsample = lambda x, factor=2: jax.image.resize(x, [x.shape[0], x.shape[1] * factor, x.shape[2] * factor, x.shape[3]], method=jax.image.ResizeMethod.LINEAR)
     decoder_layers = [
         hk.Linear(64), jax.nn.elu,
-        hk.LayerNorm(axis=1, create_scale=True, create_offset=True),
-        hk.Linear(128), jax.nn.elu,
-        hk.LayerNorm(axis=1, create_scale=True, create_offset=True),
         hk.Reshape([2, 2, -1]),
         upsample,
         hk.Conv2D(32, kernel_shape=3, padding='SAME'), jax.nn.elu,
@@ -184,13 +181,13 @@ def net_fn(images: jnp.ndarray) -> jnp.ndarray:
     if regularised_layer == 'bottleneck':
         regularised_layer_idx = 1  # outputs of this layer are used for logistic regression
     elif regularised_layer == 'dec-conv-1':
-        regularised_layer_idx = 10
+        regularised_layer_idx = 6
     elif regularised_layer == 'dec-conv-2':
-        regularised_layer_idx = 14
+        regularised_layer_idx = 10
     elif regularised_layer == 'dec-conv-3':
-        regularised_layer_idx = 18
+        regularised_layer_idx = 14
     elif regularised_layer == 'dec-conv-4':
-        regularised_layer_idx = 21
+        regularised_layer_idx = 17
     else:
         raise NotImplementedError
     decoder_start = hk.Sequential(decoder_layers[: regularised_layer_idx + 1])
